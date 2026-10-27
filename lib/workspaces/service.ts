@@ -4,6 +4,7 @@ import { ApiError } from "@/lib/api/errors";
 // The service intentionally relies on Postgres RLS for the final authorization decision.
 // Application checks provide deterministic API errors and prevent invalid state transitions.
 type Client = SupabaseClient;
+type RoleSummary = { name?: string | null };
 
 type WorkspaceInput = {
   name: string;
@@ -12,6 +13,13 @@ type WorkspaceInput = {
   description?: string | null;
   settings?: Record<string, unknown>;
 };
+
+function getRoleName(roles: unknown) {
+  if (Array.isArray(roles)) {
+    return (roles[0] as RoleSummary | undefined)?.name ?? null;
+  }
+  return (roles as RoleSummary | null | undefined)?.name ?? null;
+}
 
 export async function listWorkspaces(supabase: Client) {
   const { data, error } = await supabase
@@ -115,7 +123,7 @@ export async function updateMember(
   if (memberError) throw mapSupabaseError(memberError);
   if (!member) throw new ApiError(404, "NOT_FOUND", "Workspace member not found.");
 
-  const currentRole = Array.isArray(member.roles) ? member.roles[0]?.name : member.roles?.name;
+  const currentRole = getRoleName(member.roles);
   if (currentRole === "OWNER") {
     throw new ApiError(403, "FORBIDDEN", "The workspace owner cannot be modified through the membership API.");
   }
