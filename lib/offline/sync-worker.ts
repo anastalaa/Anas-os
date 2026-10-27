@@ -336,7 +336,7 @@ export async function hasRunnableSyncOperations(userId: string, workspaceId?: st
 
 /** Manually requeue failed operations. Conflicts require a separate resolution choice. */
 export async function retryErroredOperations(userId: string, workspaceId?: string): Promise<void> {
-  const operations = await listAllOperations(workspaceId);
+  const operations = await listAllOperations(userId, workspaceId);
   for (const operation of operations) {
     if (operation.status !== "ERROR" || operation.entity === "capture") continue;
     await updateOperation(userId, {

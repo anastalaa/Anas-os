@@ -60,9 +60,14 @@ export async function registerDevice(
   user: User,
   input: z.infer<typeof registerDeviceSchema>,
 ) {
+  const { expected_user_id: expectedUserId, ...deviceInput } = input;
+  if (expectedUserId && expectedUserId !== user.id) {
+    throw new ApiError(403, "FORBIDDEN", "The active account changed; device registration was cancelled.");
+  }
+
   const { data, error } = await supabase
     .from("devices")
-    .insert({ ...input, user_id: user.id, last_seen_at: new Date().toISOString() })
+    .insert({ ...deviceInput, user_id: user.id, last_seen_at: new Date().toISOString() })
     .select("id,device_name,device_type,platform,app_version,last_seen_at,last_sync_at,created_at")
     .single();
 
@@ -75,6 +80,10 @@ export async function queueSyncOperation(
   user: User,
   input: z.infer<typeof syncRequestSchema>,
 ) {
+  if (input.expected_user_id && input.expected_user_id !== user.id) {
+    throw new ApiError(403, "FORBIDDEN", "The active account changed; this local operation was not uploaded.");
+  }
+
   const table = entityTables[input.entity_type];
   const permission = writePermissions[input.operation];
 
