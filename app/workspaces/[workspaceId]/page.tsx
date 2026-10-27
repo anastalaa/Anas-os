@@ -2,6 +2,15 @@ import Link from "next/link";
 import { requireAuthenticatedUser } from "@/lib/api/auth";
 import { getWorkspace, listMembers } from "@/lib/workspaces/service";
 
+type RoleSummary = { name?: string | null };
+
+function getRoleName(roles: unknown) {
+  if (Array.isArray(roles)) {
+    return (roles[0] as RoleSummary | undefined)?.name ?? null;
+  }
+  return (roles as RoleSummary | null | undefined)?.name ?? null;
+}
+
 export default async function WorkspaceDetailPage({
   params,
 }: {
@@ -34,7 +43,7 @@ export default async function WorkspaceDetailPage({
           <h2 style={{ marginTop: 0 }}>Members</h2>
           <div style={{ display: "grid", gap: 12 }}>
             {members.map((member) => {
-              const role = Array.isArray(member.roles) ? member.roles[0]?.name : member.roles?.name;
+              const role = getRoleName(member.roles);
               return (
                 <div key={member.id} style={{ display: "flex", justifyContent: "space-between", gap: 16, padding: "12px 0", borderBottom: "1px solid var(--border)" }}>
                   <span style={{ overflowWrap: "anywhere" }}>{member.user_id}</span>
