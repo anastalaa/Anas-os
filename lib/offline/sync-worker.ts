@@ -139,13 +139,15 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
   if (pending.length === 0) return;
 
   // A blocked operation must prevent newer changes to the same record from overtaking it.
+  const now = Date.now();
   const blockedEntities = new Set(
     allOperations
-      .filter((operation) =>
-        operation.status === "SERVER_PENDING" ||
-        operation.status === "CONFLICT" ||
-        operation.status === "ERROR",
-      )
+      .filter((operation) => {
+        if (operation.status === "SERVER_PENDING" || operation.status === "CONFLICT") return true;
+        if (operation.status !== "ERROR") return false;
+        if (operation.retryable === false) return true;
+        return Boolean(operation.nextRetryAt && Date.parse(operation.nextRetryAt) > now);
+      })
       .map(entityKey),
   );
 
@@ -266,6 +268,29 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
       return;
     }
   }
+}
+
+/** True when queued work can progress without overtaking an unresolved operation for the same record. */
+export async function hasRunnableSyncOperations(workspaceId?: string): Promise<boolean> {
+  if (typeof window === "undefined" || typeof navigator === "undefined" || !navigator.onLine) return false;
+
+  const [allOperations, pending] = await Promise.all([
+    listAllOperations(workspaceId),
+    listPendingOperations(workspaceId),
+  ]);
+  const now = Date.now();
+  const blockedEntities = new Set(
+    allOperations
+      .filter((operation) => {
+        if (operation.status === "SERVER_PENDING" || operation.status === "CONFLICT") return true;
+        if (operation.status !== "ERROR") return false;
+        if (operation.retryable === false) return true;
+        return Boolean(operation.nextRetryAt && Date.parse(operation.nextRetryAt) > now);
+      })
+      .map(entityKey),
+  );
+
+  return pending.some((operation) => !blockedEntities.has(entityKey(operation)));
 }
 
 /** Manually requeue failed operations. Conflicts require a separate resolution choice. */

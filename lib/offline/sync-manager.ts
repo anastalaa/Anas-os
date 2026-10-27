@@ -1,9 +1,8 @@
 import {
   listAllOperations,
-  listPendingOperations,
   SYNC_QUEUE_UPDATED_EVENT,
 } from "./idb";
-import { retryErroredOperations, runSyncWorker } from "./sync-worker";
+import { hasRunnableSyncOperations, retryErroredOperations, runSyncWorker } from "./sync-worker";
 import type { SyncSnapshot, SyncState } from "./types";
 
 export type SyncListener = (snapshot: SyncSnapshot) => void;
@@ -116,9 +115,9 @@ function startSync() {
     .finally(() => {
       workerPromise = null;
       if (!workerFailed && typeof window !== "undefined" && navigator.onLine) {
-        // Queue changes made while this run was active are picked up without a second timer.
-        void listPendingOperations().then((pending) => {
-          if (pending.length > 0) startSync();
+        // Continue batches only if runnable work remains; blocked items must not create a tight loop.
+        void hasRunnableSyncOperations().then((hasRunnable) => {
+          if (hasRunnable) startSync();
         }).catch(() => undefined);
       }
     });
