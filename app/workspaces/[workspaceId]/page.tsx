@@ -2,6 +2,8 @@ import Link from "next/link";
 import { requireAuthenticatedUser } from "@/lib/api/auth";
 import { getWorkspace, listMembers } from "@/lib/workspaces/service";
 
+export const dynamic = "force-dynamic";
+
 type RoleSummary = { name?: string | null };
 
 function getRoleName(roles: unknown) {
