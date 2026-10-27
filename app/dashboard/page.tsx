@@ -1,4 +1,5 @@
 import Link from "next/link";
+import SyncStatus from "./sync-status";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { hasSupabaseConfig } from "@/lib/env";
 
@@ -28,6 +29,8 @@ export default async function DashboardPage() {
         <p style={{ color: "var(--muted)", lineHeight: 1.6 }}>
           Authenticated as {user.email ?? "your account"}. Core workspace modules are being built behind this boundary.
         </p>
+
+        <SyncStatus />
 
         <div style={{ marginTop: 24 }}>
           <Link
