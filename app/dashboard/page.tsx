@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { hasSupabaseConfig } from "@/lib/env";
 
@@ -27,6 +28,15 @@ export default async function DashboardPage() {
         <p style={{ color: "var(--muted)", lineHeight: 1.6 }}>
           Authenticated as {user.email ?? "your account"}. Core workspace modules are being built behind this boundary.
         </p>
+
+        <div style={{ marginTop: 24 }}>
+          <Link
+            href="/workspaces"
+            style={{ display: "inline-block", padding: "12px 16px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--border)" }}
+          >
+            Open Workspace Engine →
+          </Link>
+        </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginTop: 32 }}>
           {[
