@@ -25,6 +25,10 @@ function createClientOperationId(): string {
   return globalThis.crypto.randomUUID();
 }
 
+function entityKey(operation: Pick<SyncOperation, "entity" | "entityId">): string {
+  return `${operation.entity}:${operation.entityId}`;
+}
+
 async function parseBody(response: Response): Promise<ApiBody> {
   try {
     return (await response.json()) as ApiBody;
@@ -58,7 +62,11 @@ async function getOrRegisterDevice(fetcher: typeof fetch): Promise<string> {
   return deviceId;
 }
 
-async function updateStatus(operation: SyncOperation, status: SyncOperation["status"], patch: Partial<SyncOperation> = {}) {
+async function updateStatus(
+  operation: SyncOperation,
+  status: SyncOperation["status"],
+  patch: Partial<SyncOperation> = {},
+) {
   await updateOperation({
     ...operation,
     ...patch,
@@ -124,12 +132,29 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
 
   const fetcher = options.fetcher ?? fetch;
   await reconcileServerPending(fetcher, options.workspaceId);
-  const deviceId = await getOrRegisterDevice(fetcher);
+
+  // Do not create device records unless there is work that needs to be uploaded.
+  const allOperations = await listAllOperations(options.workspaceId);
   const pending = await listPendingOperations(options.workspaceId);
+  if (pending.length === 0) return;
+
+  // A blocked operation must prevent newer changes to the same record from overtaking it.
+  const blockedEntities = new Set(
+    allOperations
+      .filter((operation) =>
+        operation.status === "SERVER_PENDING" ||
+        operation.status === "CONFLICT" ||
+        operation.status === "ERROR",
+      )
+      .map(entityKey),
+  );
+
+  const deviceId = await getOrRegisterDevice(fetcher);
   const queue = pending.slice(0, Math.max(1, options.maxOperations ?? 50));
 
   for (const queued of queue) {
     if (!navigator.onLine) return;
+    if (blockedEntities.has(entityKey(queued))) continue;
 
     if (queued.entity === "capture") {
       await updateStatus(queued, "ERROR", {
@@ -137,6 +162,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
         retryable: false,
         nextRetryAt: null,
       });
+      blockedEntities.add(entityKey(queued));
       continue;
     }
 
@@ -174,6 +200,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
           retryable: false,
           nextRetryAt: null,
         });
+        blockedEntities.add(entityKey(operation));
         continue;
       }
 
@@ -194,7 +221,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
           retryable: true,
           nextRetryAt: new Date(Date.now() + calculateRetryDelayMs(attempts)).toISOString(),
         });
-        return; // Preserve queue ordering after a transient failure.
+        return; // Preserve queue order after an ambiguous or transient failure.
       }
 
       if (!response.ok) {
@@ -203,7 +230,8 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
           retryable: false,
           nextRetryAt: null,
         });
-        return; // Do not upload later operations around an unresolved earlier write.
+        blockedEntities.add(entityKey(operation));
+        continue; // Other records can progress, but this record's newer writes stay blocked.
       }
 
       if (body.data?.status === "SYNCED") {
@@ -215,6 +243,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
           retryable: false,
           nextRetryAt: null,
         });
+        blockedEntities.add(entityKey(operation));
       }
     } catch (error) {
       const attempts = (operation.attemptCount ?? 0) + 1;
@@ -229,8 +258,12 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
   }
 }
 
-/** Allows a user-facing Conflict Center or retry action to deliberately requeue an operation. */
+/** Allows a user-facing Conflict Center or retry action to deliberately requeue an error. */
 export async function retrySyncOperation(operation: SyncOperation): Promise<void> {
+  if (operation.status !== "ERROR") {
+    throw new Error("Only failed operations can be retried directly; conflicts need an explicit resolution.");
+  }
+
   await updateOperation({
     ...operation,
     status: "PENDING",

@@ -6,6 +6,7 @@ const labels = {
   ONLINE: "Online",
   OFFLINE: "Offline",
   SYNCING: "Syncing",
+  SERVER_PENDING: "Accepted; awaiting server processing",
   SYNCED: "Synced",
   CONFLICT: "Conflict needs review",
   ERROR: "Sync error",

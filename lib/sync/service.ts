@@ -17,6 +17,29 @@ const writePermissions = {
   DELETE: "DELETE",
 } as const;
 
+function matchesIdempotentRequest(
+  existing: {
+    workspace_id: string | null;
+    entity_type: string;
+    entity_id: string;
+    operation: string;
+    base_version: number | null;
+    client_timestamp: string;
+    payload: unknown;
+  },
+  input: z.infer<typeof syncRequestSchema>,
+) {
+  return (
+    existing.workspace_id === input.workspace_id &&
+    existing.entity_type === input.entity_type &&
+    existing.entity_id === input.entity_id &&
+    existing.operation === input.operation &&
+    existing.base_version === (input.base_version ?? null) &&
+    existing.client_timestamp === input.client_timestamp &&
+    JSON.stringify(existing.payload ?? {}) === JSON.stringify(input.payload ?? {})
+  );
+}
+
 export async function registerDevice(
   supabase: SupabaseClient,
   user: User,
@@ -56,7 +79,7 @@ export async function queueSyncOperation(
   if (input.client_operation_id) {
     const { data: existing, error: existingError } = await supabase
       .from("sync_operations")
-      .select("id,client_operation_id,entity_type,entity_id,operation,base_version,client_timestamp,status,created_at")
+      .select("id,client_operation_id,workspace_id,entity_type,entity_id,operation,base_version,client_timestamp,payload,status,created_at")
       .eq("user_id", user.id)
       .eq("device_id", input.device_id)
       .eq("client_operation_id", input.client_operation_id)
@@ -64,11 +87,7 @@ export async function queueSyncOperation(
 
     if (existingError) throw new ApiError(500, "INTERNAL_ERROR", "Idempotency state could not be read.");
     if (existing) {
-      const matches =
-        existing.entity_type === input.entity_type &&
-        existing.entity_id === input.entity_id &&
-        existing.operation === input.operation;
-      if (!matches) {
+      if (!matchesIdempotentRequest(existing, input)) {
         throw new ApiError(409, "CONFLICT", "This client operation ID was already used for a different operation.");
       }
       return existing;
@@ -116,26 +135,20 @@ export async function queueSyncOperation(
   const { data, error } = await supabase
     .from("sync_operations")
     .insert(insertPayload)
-    .select("id,client_operation_id,entity_type,entity_id,operation,base_version,client_timestamp,status,created_at")
+    .select("id,client_operation_id,workspace_id,entity_type,entity_id,operation,base_version,client_timestamp,payload,status,created_at")
     .single();
 
   // A concurrent retry can hit the unique index. Re-read by the same idempotency key.
   if (error && input.client_operation_id) {
     const { data: existing } = await supabase
       .from("sync_operations")
-      .select("id,client_operation_id,entity_type,entity_id,operation,base_version,client_timestamp,status,created_at")
+      .select("id,client_operation_id,workspace_id,entity_type,entity_id,operation,base_version,client_timestamp,payload,status,created_at")
       .eq("user_id", user.id)
       .eq("device_id", input.device_id)
       .eq("client_operation_id", input.client_operation_id)
       .maybeSingle();
-    if (
-      existing &&
-      existing.entity_type === input.entity_type &&
-      existing.entity_id === input.entity_id &&
-      existing.operation === input.operation
-    ) {
-      return existing;
-    }
+
+    if (existing && matchesIdempotentRequest(existing, input)) return existing;
   }
 
   if (error) throw new ApiError(500, "INTERNAL_ERROR", "Sync operation could not be queued.");
