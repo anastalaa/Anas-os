@@ -1,0 +1,98 @@
+import type { SupabaseClient, User } from "@supabase/supabase-js";
+import { ApiError } from "@/lib/api/errors";
+import { requireWorkspacePermission } from "@/lib/api/workspace-access";
+import type { z } from "zod";
+import { registerDeviceSchema, syncRequestSchema } from "@/lib/validation/sync";
+
+const entityTables = {
+  task: "tasks",
+  project: "projects",
+  note: "notes",
+  document: "documents",
+} as const;
+
+const writePermissions = {
+  CREATE: "CREATE",
+  UPDATE: "EDIT",
+  DELETE: "DELETE",
+} as const;
+
+export async function registerDevice(
+  supabase: SupabaseClient,
+  user: User,
+  input: z.infer<typeof registerDeviceSchema>,
+) {
+  const { data, error } = await supabase
+    .from("devices")
+    .insert({ ...input, user_id: user.id, last_seen_at: new Date().toISOString() })
+    .select("id,device_name,device_type,platform,app_version,last_seen_at,last_sync_at,created_at")
+    .single();
+
+  if (error) throw new ApiError(500, "INTERNAL_ERROR", "Device could not be registered.");
+  return data;
+}
+
+export async function queueSyncOperation(
+  supabase: SupabaseClient,
+  user: User,
+  input: z.infer<typeof syncRequestSchema>,
+) {
+  const table = entityTables[input.entity_type];
+  const permission = writePermissions[input.operation];
+
+  await requireWorkspacePermission(supabase, input.workspace_id, input.entity_type, permission);
+
+  const { data: device, error: deviceError } = await supabase
+    .from("devices")
+    .select("id")
+    .eq("id", input.device_id)
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (deviceError) throw new ApiError(500, "INTERNAL_ERROR", "Device could not be verified.");
+  if (!device) throw new ApiError(403, "FORBIDDEN", "The device is not registered to this account.");
+
+  let currentVersion: number | null = null;
+  if (input.operation !== "CREATE") {
+    const { data: current, error: currentError } = await supabase
+      .from(table)
+      .select("version")
+      .eq("id", input.entity_id)
+      .eq("workspace_id", input.workspace_id)
+      .maybeSingle();
+
+    if (currentError) throw new ApiError(500, "INTERNAL_ERROR", "Current record version could not be read.");
+    if (!current) throw new ApiError(404, "NOT_FOUND", "The record to synchronize was not found.");
+    currentVersion = Number(current.version);
+
+    if (input.base_version === null || input.base_version === undefined || currentVersion !== input.base_version) {
+      throw new ApiError(409, "CONFLICT", "The server record changed since this offline operation was created.", {
+        entity_type: input.entity_type,
+        entity_id: input.entity_id,
+        base_version: input.base_version ?? null,
+        current_version: currentVersion,
+        resolution: ["KEEP_SERVER", "KEEP_MINE", "MERGE", "REVIEW"],
+      });
+    }
+  }
+
+  const { data, error } = await supabase
+    .from("sync_operations")
+    .insert({
+      device_id: input.device_id,
+      user_id: user.id,
+      workspace_id: input.workspace_id,
+      entity_type: input.entity_type,
+      entity_id: input.entity_id,
+      operation: input.operation,
+      payload: input.payload,
+      base_version: input.base_version ?? currentVersion,
+      client_timestamp: input.client_timestamp,
+      status: "PENDING",
+    })
+    .select("id,entity_type,entity_id,operation,base_version,client_timestamp,status,created_at")
+    .single();
+
+  if (error) throw new ApiError(500, "INTERNAL_ERROR", "Sync operation could not be queued.");
+  return data;
+}
