@@ -2,6 +2,8 @@ import Link from "next/link";
 import { requireAuthenticatedUser } from "@/lib/api/auth";
 import { listWorkspaces } from "@/lib/workspaces/service";
 
+export const dynamic = "force-dynamic";
+
 export default async function WorkspacesPage() {
   const { supabase } = await requireAuthenticatedUser();
   const workspaces = await listWorkspaces(supabase);
