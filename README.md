@@ -14,19 +14,25 @@ Private, modular, offline-first personal and professional operating system.
 
 ## Initial stack
 - Next.js + React + TypeScript
-- Tailwind CSS + shadcn/ui
 - Supabase Auth/Postgres/Storage
 - PostgreSQL full-text search + pgvector
 - IndexedDB offline layer
+- Zod validation
 - Vitest + Playwright
 - GitHub Actions
 
-## Repository status
-Architecture and engineering specifications are being established before application implementation.
+## Foundation status
+The `codex/core-foundation` branch now contains the executable application shell, validated environment boundary, Supabase client boundaries, core PostgreSQL/RLS migration, and CI validation workflow.
 
-See:
+Production credentials and production database changes are intentionally not included in source control.
+
+## Security warning
+This repository is currently public. Do not commit personal, family, financial, authentication, production, or other private ANAS OS data. The repository should be switched to private before real personal data or production configuration is introduced.
+
+## Documentation
 - `ANAS_OS_CONSTITUTION.md`
 - `ANAS_OS_ENGINEERING.md`
+- `supabase/migrations/0001_core_foundation.sql`
 - `docs/architecture/`
 - `docs/security/`
 - `docs/ai/`
