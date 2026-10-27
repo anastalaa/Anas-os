@@ -4,10 +4,10 @@ import { registerDeviceSchema, syncRequestSchema } from "./sync";
 describe("sync validation", () => {
   it("accepts a version-aware update operation", () => {
     const result = syncRequestSchema.safeParse({
-      device_id: "00000000-0000-0000-0000-000000000001",
-      workspace_id: "00000000-0000-0000-0000-000000000002",
+      device_id: "00000000-0000-4000-8000-000000000001",
+      workspace_id: "00000000-0000-4000-8000-000000000002",
       entity_type: "task",
-      entity_id: "00000000-0000-0000-0000-000000000003",
+      entity_id: "00000000-0000-4000-8000-000000000003",
       operation: "UPDATE",
       payload: { title: "Offline update" },
       base_version: 4,
@@ -19,10 +19,10 @@ describe("sync validation", () => {
 
   it("rejects unsupported entities", () => {
     const result = syncRequestSchema.safeParse({
-      device_id: "00000000-0000-0000-0000-000000000001",
-      workspace_id: "00000000-0000-0000-0000-000000000002",
+      device_id: "00000000-0000-4000-8000-000000000001",
+      workspace_id: "00000000-0000-4000-8000-000000000002",
       entity_type: "finance",
-      entity_id: "00000000-0000-0000-0000-000000000003",
+      entity_id: "00000000-0000-4000-8000-000000000003",
       operation: "UPDATE",
       client_timestamp: "2026-10-27T09:00:00.000Z",
     });
