@@ -9,8 +9,8 @@ const DEVICE_STORAGE_KEY = "anas-os-device-id";
 const APP_VERSION = "0.1.0";
 
 type ApiBody = {
-  data?: { status?: string; [key: string]: unknown };
-  error?: { code?: string; message?: string };
+  data?: { id?: string; status?: string; error_code?: string; [key: string]: unknown };
+  error?: { code?: string; message?: string; details?: unknown };
 };
 
 export function calculateRetryDelayMs(attemptCount: number): number {
@@ -195,8 +195,12 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
       const body = await parseBody(response);
 
       if (response.status === 409) {
+        const details = body.error?.details && typeof body.error.details === "object"
+          ? body.error.details as Record<string, unknown>
+          : undefined;
         await updateStatus(operation, "CONFLICT", {
           error: body.error?.message ?? "The server detected a version conflict.",
+          conflictDetails: details,
           retryable: false,
           nextRetryAt: null,
         });
@@ -205,12 +209,13 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
       }
 
       if (response.status === 401) {
-        await updateStatus(operation, "PENDING", {
-          error: body.error?.message ?? "Sign in to resume synchronization.",
-          retryable: true,
+        await updateStatus(operation, "ERROR", {
+          error: body.error?.message ?? "Sign in to resume synchronization, then retry this operation.",
+          retryable: false,
           nextRetryAt: null,
         });
-        return;
+        blockedEntities.add(entityKey(operation));
+        continue;
       }
 
       if (response.status === 429 || response.status >= 500) {
@@ -235,7 +240,12 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
       }
 
       if (body.data?.status === "SYNCED") {
-        await updateStatus(operation, "SYNCED", { error: undefined, retryable: false, nextRetryAt: null });
+        await updateStatus(operation, "SYNCED", {
+          error: undefined,
+          retryable: false,
+          nextRetryAt: null,
+          serverVersion: typeof body.data.server_version === "number" ? body.data.server_version : undefined,
+        });
       } else {
         // 202 currently means accepted into the server queue, not applied to the entity.
         await updateStatus(operation, "SERVER_PENDING", {
@@ -258,7 +268,25 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
   }
 }
 
-/** Allows a user-facing Conflict Center or retry action to deliberately requeue an error. */
+/** Manually requeue failed operations. Conflicts require a separate resolution choice. */
+export async function retryErroredOperations(workspaceId?: string): Promise<void> {
+  const operations = await listAllOperations(workspaceId);
+  for (const operation of operations) {
+    if (operation.status !== "ERROR" || operation.entity === "capture") continue;
+    await updateOperation({
+      ...operation,
+      status: "PENDING",
+      clientOperationId: operation.retryable === false ? undefined : operation.clientOperationId,
+      error: undefined,
+      retryable: true,
+      attemptCount: 0,
+      nextRetryAt: null,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+}
+
+/** Allows an explicit retry action to requeue one error; conflicts must be resolved separately. */
 export async function retrySyncOperation(operation: SyncOperation): Promise<void> {
   if (operation.status !== "ERROR") {
     throw new Error("Only failed operations can be retried directly; conflicts need an explicit resolution.");
@@ -267,6 +295,7 @@ export async function retrySyncOperation(operation: SyncOperation): Promise<void
   await updateOperation({
     ...operation,
     status: "PENDING",
+    clientOperationId: operation.retryable === false ? undefined : operation.clientOperationId,
     error: undefined,
     retryable: true,
     attemptCount: 0,

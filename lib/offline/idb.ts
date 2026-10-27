@@ -3,6 +3,7 @@ import type { SyncOperation } from "./types";
 const DB_NAME = "anas-os-offline";
 const DB_VERSION = 1;
 const STORE_NAME = "sync_operations";
+export const SYNC_QUEUE_UPDATED_EVENT = "anas-os:sync-queue-updated";
 
 function openDatabase(): Promise<IDBDatabase> {
   if (typeof window === "undefined" || !window.indexedDB) {
@@ -25,6 +26,12 @@ function openDatabase(): Promise<IDBDatabase> {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("Unable to open offline database."));
   });
+}
+
+function notifyQueueUpdated() {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(SYNC_QUEUE_UPDATED_EVENT));
+  }
 }
 
 function getAllRows(db: IDBDatabase, workspaceId?: string): Promise<SyncOperation[]> {
@@ -52,6 +59,7 @@ export async function enqueueOperation(operation: SyncOperation): Promise<void> 
   } finally {
     db.close();
   }
+  notifyQueueUpdated();
 }
 
 /** Returns operations ready to upload, including interrupted work from a prior session. */
@@ -67,7 +75,9 @@ export async function listPendingOperations(workspaceId?: string): Promise<SyncO
   const now = Date.now();
   return rows
     .filter((operation) => {
-      if (operation.status === "PENDING" || operation.status === "SYNCING") return true;
+      if (operation.status === "PENDING" || operation.status === "SYNCING") {
+        return !operation.nextRetryAt || Date.parse(operation.nextRetryAt) <= now;
+      }
       if (operation.status !== "ERROR" || operation.retryable === false) return false;
       return !operation.nextRetryAt || Date.parse(operation.nextRetryAt) <= now;
     })
@@ -107,4 +117,5 @@ export async function clearOperation(id: string): Promise<void> {
   } finally {
     db.close();
   }
+  notifyQueueUpdated();
 }

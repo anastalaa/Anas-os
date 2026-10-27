@@ -36,9 +36,12 @@ export type SyncOperation = {
   status: SyncOperationStatus;
   createdAt: string;
   updatedAt: string;
+  /** Version returned only after the server confirms application. */
+  serverVersion?: number;
   attemptCount?: number;
   nextRetryAt?: string | null;
   retryable?: boolean;
+  conflictDetails?: Record<string, unknown>;
   error?: string;
 };
 

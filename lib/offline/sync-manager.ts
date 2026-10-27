@@ -1,5 +1,9 @@
-import { listAllOperations } from "./idb";
-import { runSyncWorker } from "./sync-worker";
+import {
+  listAllOperations,
+  listPendingOperations,
+  SYNC_QUEUE_UPDATED_EVENT,
+} from "./idb";
+import { retryErroredOperations, runSyncWorker } from "./sync-worker";
 import type { SyncSnapshot, SyncState } from "./types";
 
 export type SyncListener = (snapshot: SyncSnapshot) => void;
@@ -14,6 +18,7 @@ let snapshot: SyncSnapshot = {
 const listeners = new Set<SyncListener>();
 let initialized = false;
 let workerPromise: Promise<void> | null = null;
+let retryTimer: number | null = null;
 
 function emit(next: SyncSnapshot) {
   snapshot = next;
@@ -36,14 +41,26 @@ async function refreshQueueSnapshot() {
     else state = "ONLINE";
 
     const unresolvedError = operations.find((operation) => operation.status === "ERROR" || operation.status === "CONFLICT");
+    const latestConfirmedSync = operations
+      .filter((operation) => operation.status === "SYNCED")
+      .map((operation) => operation.updatedAt)
+      .sort()
+      .at(-1);
+    const lastSyncedAt =
+      latestConfirmedSync && (!snapshot.lastSyncedAt || latestConfirmedSync > snapshot.lastSyncedAt)
+        ? latestConfirmedSync
+        : snapshot.lastSyncedAt;
+
     emit({
       ...snapshot,
       state,
       pendingCount,
-      lastError: unresolvedError?.error ?? (state === "SERVER_PENDING" ? "The server accepted operations; final processing is still pending." : null),
-      ...(operations.some((operation) => operation.status === "SYNCED")
-        ? { lastSyncedAt: snapshot.lastSyncedAt ?? new Date().toISOString() }
-        : {}),
+      lastSyncedAt,
+      lastError: unresolvedError?.error ?? (
+        state === "SERVER_PENDING"
+          ? "The server accepted operations; final processing is still pending."
+          : null
+      ),
     });
   } catch (error) {
     emit({
@@ -54,12 +71,42 @@ async function refreshQueueSnapshot() {
   }
 }
 
+async function scheduleNextRetry() {
+  if (typeof window === "undefined") return;
+  if (retryTimer !== null) {
+    window.clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+  if (!navigator.onLine) return;
+
+  try {
+    const operations = await listAllOperations();
+    const retryAt = operations
+      .filter((operation) => operation.status === "ERROR" && operation.retryable === true && operation.nextRetryAt)
+      .map((operation) => Date.parse(operation.nextRetryAt as string))
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b)[0];
+
+    if (retryAt === undefined) return;
+    const delay = Math.max(0, Math.min(2_147_000_000, retryAt - Date.now()));
+    retryTimer = window.setTimeout(() => {
+      retryTimer = null;
+      startSync();
+    }, delay);
+  } catch {
+    // Queue refresh already exposes storage errors to subscribers.
+  }
+}
+
 function startSync() {
   if (typeof window === "undefined" || !navigator.onLine || workerPromise) return;
   emit({ ...snapshot, state: "SYNCING", lastError: null });
+  let workerFailed = false;
   workerPromise = runSyncWorker()
     .then(() => refreshQueueSnapshot())
+    .then(() => scheduleNextRetry())
     .catch((error: unknown) => {
+      workerFailed = true;
       emit({
         ...snapshot,
         state: "ERROR",
@@ -68,6 +115,12 @@ function startSync() {
     })
     .finally(() => {
       workerPromise = null;
+      if (!workerFailed && typeof window !== "undefined" && navigator.onLine) {
+        // Queue changes made while this run was active are picked up without a second timer.
+        void listPendingOperations().then((pending) => {
+          if (pending.length > 0) startSync();
+        }).catch(() => undefined);
+      }
     });
 }
 
@@ -77,7 +130,17 @@ function handleOnline() {
 }
 
 function handleOffline() {
+  if (retryTimer !== null && typeof window !== "undefined") {
+    window.clearTimeout(retryTimer);
+    retryTimer = null;
+  }
   emit({ ...snapshot, state: "OFFLINE" });
+}
+
+function handleQueueUpdated() {
+  void refreshQueueSnapshot().then(() => {
+    if (typeof navigator !== "undefined" && navigator.onLine) startSync();
+  });
 }
 
 export function initializeSyncManager() {
@@ -86,6 +149,7 @@ export function initializeSyncManager() {
   snapshot = { ...snapshot, state: navigator.onLine ? "ONLINE" : "OFFLINE" };
   window.addEventListener("online", handleOnline);
   window.addEventListener("offline", handleOffline);
+  window.addEventListener(SYNC_QUEUE_UPDATED_EVENT, handleQueueUpdated);
   void refreshQueueSnapshot().then(() => {
     if (navigator.onLine) startSync();
   });
@@ -112,7 +176,10 @@ export async function triggerSync() {
     await refreshQueueSnapshot();
     return;
   }
+  // A user-initiated sync explicitly retries failed non-capture operations.
+  await retryErroredOperations();
   startSync();
   if (workerPromise) await workerPromise;
   await refreshQueueSnapshot();
+  await scheduleNextRetry();
 }
