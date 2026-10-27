@@ -1,13 +1,19 @@
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { ApiError } from "@/lib/api/errors";
-import type { Database } from "@/lib/supabase/database.types";
 
 // The service intentionally relies on Postgres RLS for the final authorization decision.
 // Application checks provide deterministic API errors and prevent invalid state transitions.
+type Client = SupabaseClient;
 
-type Client = SupabaseClient<Database>;
+type WorkspaceInput = {
+  name: string;
+  slug: string;
+  type: "PERSONAL" | "FAMILY" | "PROFESSIONAL" | "PROJECT" | "SHARED";
+  description?: string | null;
+  settings?: Record<string, unknown>;
+};
 
-export async function listWorkspaces(supabase: Client, user: User) {
+export async function listWorkspaces(supabase: Client) {
   const { data, error } = await supabase
     .from("workspaces")
     .select("id,name,slug,type,description,owner_id,settings,created_at,updated_at")
@@ -29,11 +35,7 @@ export async function getWorkspace(supabase: Client, workspaceId: string) {
   return data;
 }
 
-export async function createWorkspace(
-  supabase: Client,
-  user: User,
-  input: Database["public"]["Tables"]["workspaces"]["Insert"],
-) {
+export async function createWorkspace(supabase: Client, user: User, input: WorkspaceInput) {
   const { data, error } = await supabase
     .from("workspaces")
     .insert({ ...input, owner_id: user.id })
@@ -47,7 +49,7 @@ export async function createWorkspace(
 export async function updateWorkspace(
   supabase: Client,
   workspaceId: string,
-  input: Database["public"]["Tables"]["workspaces"]["Update"],
+  input: Partial<WorkspaceInput>,
 ) {
   const { data, error } = await supabase
     .from("workspaces")
@@ -88,12 +90,7 @@ export async function addMember(
 
   const { data, error } = await supabase
     .from("workspace_members")
-    .insert({
-      workspace_id: workspaceId,
-      user_id: input.user_id,
-      role_id: role.id,
-      status: input.status,
-    })
+    .insert({ workspace_id: workspaceId, user_id: input.user_id, role_id: role.id, status: input.status })
     .select("id,workspace_id,user_id,role_id,status,joined_at,created_at,updated_at,roles(name,description)")
     .single();
 
