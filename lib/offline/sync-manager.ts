@@ -56,7 +56,9 @@ export function initializeSyncManager() {
 export function subscribeToSync(listener: SyncListener) {
   listeners.add(listener);
   listener(snapshot);
-  return () => listeners.delete(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 export function getSyncSnapshot() {
