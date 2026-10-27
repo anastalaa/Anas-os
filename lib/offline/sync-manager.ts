@@ -1,7 +1,4 @@
-import {
-  listAllOperations,
-  SYNC_QUEUE_UPDATED_EVENT,
-} from "./idb";
+import { listAllOperations, SYNC_QUEUE_UPDATED_EVENT } from "./idb";
 import { hasRunnableSyncOperations, retryErroredOperations, runSyncWorker } from "./sync-worker";
 import type { SyncSnapshot, SyncState } from "./types";
 
@@ -16,6 +13,7 @@ let snapshot: SyncSnapshot = {
 
 const listeners = new Set<SyncListener>();
 let initialized = false;
+let activeUserId: string | null = null;
 let workerPromise: Promise<void> | null = null;
 let retryTimer: number | null = null;
 
@@ -24,10 +22,14 @@ function emit(next: SyncSnapshot) {
   listeners.forEach((listener) => listener(snapshot));
 }
 
-async function refreshQueueSnapshot() {
+async function refreshQueueSnapshot(userId = activeUserId) {
+  if (!userId) return;
   try {
-    const operations = await listAllOperations();
-    const pendingCount = operations.filter((operation) => operation.status !== "SYNCED" && operation.status !== "DISCARDED").length;
+    const operations = await listAllOperations(userId);
+    if (activeUserId !== userId) return;
+    const pendingCount = operations.filter((operation) =>
+      operation.status !== "SYNCED" && operation.status !== "DISCARDED"
+    ).length;
     const online = typeof navigator === "undefined" || navigator.onLine;
     let state: SyncState;
 
@@ -62,6 +64,7 @@ async function refreshQueueSnapshot() {
       ),
     });
   } catch (error) {
+    if (activeUserId !== userId) return;
     emit({
       ...snapshot,
       state: "ERROR",
@@ -70,16 +73,17 @@ async function refreshQueueSnapshot() {
   }
 }
 
-async function scheduleNextRetry() {
+async function scheduleNextRetry(userId: string) {
   if (typeof window === "undefined") return;
   if (retryTimer !== null) {
     window.clearTimeout(retryTimer);
     retryTimer = null;
   }
-  if (!navigator.onLine) return;
+  if (!navigator.onLine || activeUserId !== userId) return;
 
   try {
-    const operations = await listAllOperations();
+    const operations = await listAllOperations(userId);
+    if (activeUserId !== userId) return;
     const retryAt = operations
       .filter((operation) =>
         (operation.status === "ERROR" && operation.retryable === true) ||
@@ -98,21 +102,34 @@ async function scheduleNextRetry() {
     const delay = Math.max(0, Math.min(2_147_000_000, retryAt - Date.now()));
     retryTimer = window.setTimeout(() => {
       retryTimer = null;
-      startSync();
+      startSync(userId);
     }, delay);
   } catch {
     // Queue refresh already exposes storage errors to subscribers.
   }
 }
 
-function startSync() {
-  if (typeof window === "undefined" || !navigator.onLine || workerPromise) return;
+function startSync(requestedUserId = activeUserId) {
+  if (
+    typeof window === "undefined" ||
+    !navigator.onLine ||
+    !requestedUserId ||
+    activeUserId !== requestedUserId ||
+    workerPromise
+  ) return;
+
+  const runUserId = requestedUserId;
   emit({ ...snapshot, state: "SYNCING", lastError: null });
   let workerFailed = false;
-  workerPromise = runSyncWorker()
-    .then(() => refreshQueueSnapshot())
-    .then(() => scheduleNextRetry())
+
+  workerPromise = runSyncWorker({ userId: runUserId })
+    .then(async () => {
+      if (activeUserId !== runUserId) return;
+      await refreshQueueSnapshot(runUserId);
+      await scheduleNextRetry(runUserId);
+    })
     .catch((error: unknown) => {
+      if (activeUserId !== runUserId) return;
       workerFailed = true;
       emit({
         ...snapshot,
@@ -122,18 +139,23 @@ function startSync() {
     })
     .finally(() => {
       workerPromise = null;
+      if (activeUserId !== runUserId) {
+        if (activeUserId && typeof navigator !== "undefined" && navigator.onLine) startSync(activeUserId);
+        return;
+      }
       if (!workerFailed && typeof window !== "undefined" && navigator.onLine) {
-        // Continue batches only if runnable work remains; blocked items must not create a tight loop.
-        void hasRunnableSyncOperations().then((hasRunnable) => {
-          if (hasRunnable) startSync();
+        void hasRunnableSyncOperations(runUserId).then((hasRunnable) => {
+          if (activeUserId === runUserId && hasRunnable) startSync(runUserId);
         }).catch(() => undefined);
       }
     });
 }
 
 function handleOnline() {
-  emit({ ...snapshot, state: "SYNCING", lastError: null });
-  startSync();
+  if (activeUserId) {
+    emit({ ...snapshot, state: "SYNCING", lastError: null });
+    startSync(activeUserId);
+  }
 }
 
 function handleOffline() {
@@ -144,21 +166,41 @@ function handleOffline() {
   emit({ ...snapshot, state: "OFFLINE" });
 }
 
-function handleQueueUpdated() {
-  void refreshQueueSnapshot().then(() => {
-    if (typeof navigator !== "undefined" && navigator.onLine) startSync();
+function handleQueueUpdated(event: Event) {
+  const eventUserId = (event as CustomEvent<{ userId?: string }>).detail?.userId;
+  if (!eventUserId || eventUserId !== activeUserId) return;
+  void refreshQueueSnapshot(eventUserId).then(() => {
+    if (typeof navigator !== "undefined" && navigator.onLine) startSync(eventUserId);
   });
 }
 
-export function initializeSyncManager() {
-  if (typeof window === "undefined" || initialized) return;
+export function initializeSyncManager(userId: string) {
+  if (typeof window === "undefined" || !userId) return;
+  if (initialized && activeUserId === userId) return;
+
+  if (initialized) {
+    window.removeEventListener("online", handleOnline);
+    window.removeEventListener("offline", handleOffline);
+    window.removeEventListener(SYNC_QUEUE_UPDATED_EVENT, handleQueueUpdated);
+    if (retryTimer !== null) {
+      window.clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  }
+
+  activeUserId = userId;
+  snapshot = {
+    state: navigator.onLine ? "ONLINE" : "OFFLINE",
+    pendingCount: 0,
+    lastSyncedAt: null,
+    lastError: null,
+  };
   initialized = true;
-  snapshot = { ...snapshot, state: navigator.onLine ? "ONLINE" : "OFFLINE" };
   window.addEventListener("online", handleOnline);
   window.addEventListener("offline", handleOffline);
   window.addEventListener(SYNC_QUEUE_UPDATED_EVENT, handleQueueUpdated);
-  void refreshQueueSnapshot().then(() => {
-    if (navigator.onLine) startSync();
+  void refreshQueueSnapshot(userId).then(() => {
+    if (activeUserId === userId && navigator.onLine) startSync(userId);
   });
 }
 
@@ -178,15 +220,20 @@ export async function refreshSyncSnapshot() {
   await refreshQueueSnapshot();
 }
 
-export async function triggerSync() {
+export async function triggerSync(userId: string) {
+  initializeSyncManager(userId);
+  if (activeUserId !== userId) return;
   if (typeof navigator !== "undefined" && !navigator.onLine) {
-    await refreshQueueSnapshot();
+    await refreshQueueSnapshot(userId);
     return;
   }
-  // A user-initiated sync explicitly retries failed non-capture operations.
-  await retryErroredOperations();
-  startSync();
-  if (workerPromise) await workerPromise;
-  await refreshQueueSnapshot();
-  await scheduleNextRetry();
+
+  await retryErroredOperations(userId);
+  startSync(userId);
+  const activeRun = workerPromise;
+  if (activeRun) await activeRun;
+  if (activeUserId === userId) {
+    await refreshQueueSnapshot(userId);
+    await scheduleNextRetry(userId);
+  }
 }

@@ -5,13 +5,14 @@ const DB_VERSION = 1;
 const STORE_NAME = "sync_operations";
 export const SYNC_QUEUE_UPDATED_EVENT = "anas-os:sync-queue-updated";
 
-function openDatabase(): Promise<IDBDatabase> {
+function openDatabase(userId: string): Promise<IDBDatabase> {
+  if (!userId) return Promise.reject(new Error("An authenticated user is required for offline storage."));
   if (typeof window === "undefined" || !window.indexedDB) {
     return Promise.reject(new Error("IndexedDB is not available in this environment."));
   }
 
   return new Promise((resolve, reject) => {
-    const request = window.indexedDB.open(DB_NAME, DB_VERSION);
+    const request = window.indexedDB.open(DB_NAME + "-" + userId, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
@@ -26,9 +27,9 @@ function openDatabase(): Promise<IDBDatabase> {
   });
 }
 
-function notifyQueueUpdated() {
+function notifyQueueUpdated(userId: string) {
   if (typeof window !== "undefined") {
-    window.dispatchEvent(new Event(SYNC_QUEUE_UPDATED_EVENT));
+    window.dispatchEvent(new CustomEvent(SYNC_QUEUE_UPDATED_EVENT, { detail: { userId } }));
   }
 }
 
@@ -43,8 +44,8 @@ function getAllRows(db: IDBDatabase, workspaceId?: string): Promise<SyncOperatio
   });
 }
 
-export async function enqueueOperation(operation: SyncOperation): Promise<void> {
-  const db = await openDatabase();
+export async function enqueueOperation(userId: string, operation: SyncOperation): Promise<void> {
+  const db = await openDatabase(userId);
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readwrite");
@@ -56,11 +57,11 @@ export async function enqueueOperation(operation: SyncOperation): Promise<void> 
   } finally {
     db.close();
   }
-  notifyQueueUpdated();
+  notifyQueueUpdated(userId);
 }
 
-export async function listPendingOperations(workspaceId?: string): Promise<SyncOperation[]> {
-  const db = await openDatabase();
+export async function listPendingOperations(userId: string, workspaceId?: string): Promise<SyncOperation[]> {
+  const db = await openDatabase(userId);
   let rows: SyncOperation[];
   try {
     rows = await getAllRows(db, workspaceId);
@@ -80,8 +81,8 @@ export async function listPendingOperations(workspaceId?: string): Promise<SyncO
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
-export async function listAllOperations(workspaceId?: string): Promise<SyncOperation[]> {
-  const db = await openDatabase();
+export async function listAllOperations(userId: string, workspaceId?: string): Promise<SyncOperation[]> {
+  const db = await openDatabase(userId);
   try {
     const rows = await getAllRows(db, workspaceId);
     return rows.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -90,19 +91,19 @@ export async function listAllOperations(workspaceId?: string): Promise<SyncOpera
   }
 }
 
-export async function countPendingOperations(workspaceId?: string): Promise<number> {
-  const operations = await listAllOperations(workspaceId);
+export async function countPendingOperations(userId: string, workspaceId?: string): Promise<number> {
+  const operations = await listAllOperations(userId, workspaceId);
   return operations.filter((operation) =>
     operation.status !== "SYNCED" && operation.status !== "DISCARDED"
   ).length;
 }
 
-export async function updateOperation(operation: SyncOperation): Promise<void> {
-  await enqueueOperation(operation);
+export async function updateOperation(userId: string, operation: SyncOperation): Promise<void> {
+  await enqueueOperation(userId, operation);
 }
 
-export async function clearOperation(id: string): Promise<void> {
-  const db = await openDatabase();
+export async function clearOperation(userId: string, id: string): Promise<void> {
+  const db = await openDatabase(userId);
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readwrite");
@@ -114,5 +115,5 @@ export async function clearOperation(id: string): Promise<void> {
   } finally {
     db.close();
   }
-  notifyQueueUpdated();
+  notifyQueueUpdated(userId);
 }

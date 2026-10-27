@@ -38,15 +38,17 @@ async function parseBody(response: Response): Promise<ApiBody> {
   }
 }
 
-async function getOrRegisterDevice(fetcher: typeof fetch): Promise<string> {
+async function getOrRegisterDevice(userId: string, fetcher: typeof fetch): Promise<string> {
   if (typeof window === "undefined") throw new Error("Sync requires a browser session.");
-  const storedId = window.localStorage.getItem(DEVICE_STORAGE_KEY);
+  const storageKey = DEVICE_STORAGE_KEY + ":" + userId;
+  const storedId = window.localStorage.getItem(storageKey);
   if (storedId) return storedId;
 
   const response = await fetcher("/api/devices", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      expected_user_id: userId,
       device_name: "ANAS OS Web",
       device_type: "browser",
       platform: window.navigator.userAgent.slice(0, 50),
@@ -59,7 +61,7 @@ async function getOrRegisterDevice(fetcher: typeof fetch): Promise<string> {
     throw new Error(body.error?.message ?? "This device could not be registered for sync.");
   }
 
-  window.localStorage.setItem(DEVICE_STORAGE_KEY, deviceId);
+  window.localStorage.setItem(storageKey, deviceId);
   return deviceId;
 }
 
@@ -68,7 +70,7 @@ async function updateStatus(
   status: SyncOperation["status"],
   patch: Partial<SyncOperation> = {},
 ) {
-  await updateOperation({
+  await updateOperation(userId, {
     ...operation,
     ...patch,
     status,
@@ -76,8 +78,8 @@ async function updateStatus(
   });
 }
 
-async function reconcileServerPending(fetcher: typeof fetch, workspaceId?: string): Promise<void> {
-  const operations = await listAllOperations(workspaceId);
+async function reconcileServerPending(fetcher: typeof fetch, userId: string, workspaceId?: string): Promise<void> {
+  const operations = await listAllOperations(userId, workspaceId);
   for (const operation of operations) {
     if (operation.status !== "SERVER_PENDING" || !operation.clientOperationId) continue;
     if (typeof navigator !== "undefined" && !navigator.onLine) return;
@@ -91,14 +93,14 @@ async function reconcileServerPending(fetcher: typeof fetch, workspaceId?: strin
 
       if (response.status === 404) {
         // The server has no record for this idempotency key; retry the same operation ID.
-        await updateStatus(operation, "PENDING", { error: undefined, retryable: true, nextRetryAt: null });
+        await updateStatus(userId, operation, "PENDING", { error: undefined, retryable: true, nextRetryAt: null });
       } else if (!response.ok) {
         // Keep SERVER_PENDING: a temporary status-query failure does not prove the write failed.
-        await updateStatus(operation, "SERVER_PENDING", {
+        await updateStatus(userId, operation, "SERVER_PENDING", {
           nextRetryAt: new Date(Date.now() + SERVER_STATUS_POLL_MS).toISOString(),
         });
       } else if (body.data?.status === "SYNCED") {
-        await updateStatus(operation, "SYNCED", {
+        await updateStatus(userId, operation, "SYNCED", {
           error: undefined,
           retryable: false,
           nextRetryAt: null,
@@ -106,7 +108,7 @@ async function reconcileServerPending(fetcher: typeof fetch, workspaceId?: strin
         });
       } else if (body.data?.status === "CONFLICT") {
         const serverVersion = typeof body.data.server_version === "number" ? body.data.server_version : undefined;
-        await updateStatus(operation, "CONFLICT", {
+        await updateStatus(userId, operation, "CONFLICT", {
           error: body.data?.error_code ? String(body.data.error_code) : "The server reported a synchronization conflict.",
           conflictDetails: serverVersion === undefined ? operation.conflictDetails : { server_version: serverVersion },
           serverVersion: serverVersion ?? operation.serverVersion,
@@ -114,21 +116,21 @@ async function reconcileServerPending(fetcher: typeof fetch, workspaceId?: strin
           nextRetryAt: null,
         });
       } else if (body.data?.status === "FAILED") {
-        await updateStatus(operation, "ERROR", {
+        await updateStatus(userId, operation, "ERROR", {
           error: body.data?.error_code ? String(body.data.error_code) : "The server failed to process this operation.",
           retryable: false,
           nextRetryAt: null,
         });
       } else {
         // PENDING/SYNCING responses get a bounded poll interval, not an immediate loop.
-        await updateStatus(operation, "SERVER_PENDING", {
+        await updateStatus(userId, operation, "SERVER_PENDING", {
           nextRetryAt: new Date(Date.now() + SERVER_STATUS_POLL_MS).toISOString(),
         });
       }
     } catch {
       // The server may still be processing; schedule a later status check rather than resubmitting.
       try {
-        await updateStatus(operation, "SERVER_PENDING", {
+        await updateStatus(userId, operation, "SERVER_PENDING", {
           nextRetryAt: new Date(Date.now() + SERVER_STATUS_POLL_MS).toISOString(),
         });
       } catch {
@@ -139,6 +141,7 @@ async function reconcileServerPending(fetcher: typeof fetch, workspaceId?: strin
 }
 
 export type SyncWorkerOptions = {
+  userId: string;
   workspaceId?: string;
   fetcher?: typeof fetch;
   maxOperations?: number;
@@ -150,14 +153,16 @@ export type SyncWorkerOptions = {
  */
 export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<void> {
   if (typeof window === "undefined" || typeof navigator === "undefined") return;
+  if (!options.userId) throw new Error("An authenticated user is required for sync.");
   if (!navigator.onLine) return;
 
+  const userId = options.userId;
   const fetcher = options.fetcher ?? fetch;
-  await reconcileServerPending(fetcher, options.workspaceId);
+  await reconcileServerPending(fetcher, userId, options.workspaceId);
 
   // Do not create device records unless there is work that needs to be uploaded.
-  const allOperations = await listAllOperations(options.workspaceId);
-  const pending = await listPendingOperations(options.workspaceId);
+  const allOperations = await listAllOperations(userId, options.workspaceId);
+  const pending = await listPendingOperations(userId, options.workspaceId);
   if (pending.length === 0) return;
 
   // A blocked operation must prevent newer changes to the same record from overtaking it.
@@ -173,7 +178,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
       .map(entityKey),
   );
 
-  const deviceId = await getOrRegisterDevice(fetcher);
+  const deviceId = await getOrRegisterDevice(userId, fetcher);
   const queue = pending.slice(0, Math.max(1, options.maxOperations ?? 50));
 
   for (const queued of queue) {
@@ -181,7 +186,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
     if (blockedEntities.has(entityKey(queued))) continue;
 
     if (queued.entity === "capture") {
-      await updateStatus(queued, "ERROR", {
+      await updateStatus(userId, queued, "ERROR", {
         error: "Capture sync is not supported by the server yet.",
         retryable: false,
         nextRetryAt: null,
@@ -198,13 +203,14 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
     };
 
     // Persist the idempotency key before network I/O, so interrupted uploads can be retried safely.
-    await updateStatus(operation, "SYNCING", { clientOperationId: operation.clientOperationId });
+    await updateStatus(userId, operation, "SYNCING", { clientOperationId: operation.clientOperationId });
 
     try {
       const response = await fetcher("/api/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          expected_user_id: userId,
           device_id: deviceId,
           workspace_id: operation.workspaceId,
           entity_type: operation.entity,
@@ -222,7 +228,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
         const details = body.error?.details && typeof body.error.details === "object"
           ? body.error.details as Record<string, unknown>
           : undefined;
-        await updateStatus(operation, "CONFLICT", {
+        await updateStatus(userId, operation, "CONFLICT", {
           error: body.error?.message ?? "The server detected a version conflict.",
           conflictDetails: details,
           retryable: false,
@@ -236,8 +242,8 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
         response.status === 403 &&
         body.error?.message === "The device is not registered to this account."
       ) {
-        window.localStorage.removeItem(DEVICE_STORAGE_KEY);
-        await updateStatus(operation, "PENDING", {
+        window.localStorage.removeItem(DEVICE_STORAGE_KEY + ":" + userId);
+        await updateStatus(userId, operation, "PENDING", {
           error: "This device will be re-registered for the current account.",
           retryable: true,
           nextRetryAt: null,
@@ -246,7 +252,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
       }
 
       if (response.status === 401) {
-        await updateStatus(operation, "ERROR", {
+        await updateStatus(userId, operation, "ERROR", {
           error: body.error?.message ?? "Sign in to resume synchronization, then retry this operation.",
           retryable: false,
           nextRetryAt: null,
@@ -257,7 +263,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
 
       if (response.status === 429 || response.status >= 500) {
         const attempts = (operation.attemptCount ?? 0) + 1;
-        await updateStatus(operation, "ERROR", {
+        await updateStatus(userId, operation, "ERROR", {
           attemptCount: attempts,
           error: body.error?.message ?? `Temporary sync failure (HTTP ${response.status}).`,
           retryable: true,
@@ -267,7 +273,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
       }
 
       if (!response.ok) {
-        await updateStatus(operation, "ERROR", {
+        await updateStatus(userId, operation, "ERROR", {
           error: body.error?.message ?? `Sync request failed (HTTP ${response.status}).`,
           retryable: false,
           nextRetryAt: null,
@@ -277,7 +283,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
       }
 
       if (body.data?.status === "SYNCED") {
-        await updateStatus(operation, "SYNCED", {
+        await updateStatus(userId, operation, "SYNCED", {
           error: undefined,
           retryable: false,
           nextRetryAt: null,
@@ -285,7 +291,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
         });
       } else {
         // 202 currently means accepted into the server queue, not applied to the entity.
-        await updateStatus(operation, "SERVER_PENDING", {
+        await updateStatus(userId, operation, "SERVER_PENDING", {
           error: undefined,
           retryable: false,
           nextRetryAt: new Date(Date.now() + SERVER_STATUS_POLL_MS).toISOString(),
@@ -294,7 +300,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
       }
     } catch (error) {
       const attempts = (operation.attemptCount ?? 0) + 1;
-      await updateStatus(operation, "ERROR", {
+      await updateStatus(userId, operation, "ERROR", {
         attemptCount: attempts,
         error: error instanceof Error ? error.message : "Network error while synchronizing.",
         retryable: true,
@@ -306,12 +312,12 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
 }
 
 /** True when queued work can progress without overtaking an unresolved operation for the same record. */
-export async function hasRunnableSyncOperations(workspaceId?: string): Promise<boolean> {
+export async function hasRunnableSyncOperations(userId: string, workspaceId?: string): Promise<boolean> {
   if (typeof window === "undefined" || typeof navigator === "undefined" || !navigator.onLine) return false;
 
   const [allOperations, pending] = await Promise.all([
-    listAllOperations(workspaceId),
-    listPendingOperations(workspaceId),
+    listAllOperations(userId, workspaceId),
+    listPendingOperations(userId, workspaceId),
   ]);
   const now = Date.now();
   const blockedEntities = new Set(
@@ -329,11 +335,11 @@ export async function hasRunnableSyncOperations(workspaceId?: string): Promise<b
 }
 
 /** Manually requeue failed operations. Conflicts require a separate resolution choice. */
-export async function retryErroredOperations(workspaceId?: string): Promise<void> {
+export async function retryErroredOperations(userId: string, workspaceId?: string): Promise<void> {
   const operations = await listAllOperations(workspaceId);
   for (const operation of operations) {
     if (operation.status !== "ERROR" || operation.entity === "capture") continue;
-    await updateOperation({
+    await updateOperation(userId, {
       ...operation,
       status: "PENDING",
       clientOperationId: operation.retryable === false ? undefined : operation.clientOperationId,
@@ -347,12 +353,12 @@ export async function retryErroredOperations(workspaceId?: string): Promise<void
 }
 
 /** Allows an explicit retry action to requeue one error; conflicts must be resolved separately. */
-export async function retrySyncOperation(operation: SyncOperation): Promise<void> {
+export async function retrySyncOperation(userId: string, operation: SyncOperation): Promise<void> {
   if (operation.status !== "ERROR") {
     throw new Error("Only failed operations can be retried directly; conflicts need an explicit resolution.");
   }
 
-  await updateOperation({
+  await updateOperation(userId, {
     ...operation,
     status: "PENDING",
     clientOperationId: operation.retryable === false ? undefined : operation.clientOperationId,
