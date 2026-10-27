@@ -28,7 +28,7 @@ function emit(next: SyncSnapshot) {
 async function refreshQueueSnapshot() {
   try {
     const operations = await listAllOperations();
-    const pendingCount = operations.filter((operation) => operation.status !== "SYNCED").length;
+    const pendingCount = operations.filter((operation) => operation.status !== "SYNCED" && operation.status !== "DISCARDED").length;
     const online = typeof navigator === "undefined" || navigator.onLine;
     let state: SyncState;
 
