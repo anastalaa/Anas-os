@@ -66,6 +66,7 @@ async function getOrRegisterDevice(userId: string, fetcher: typeof fetch): Promi
 }
 
 async function updateStatus(
+  userId: string,
   operation: SyncOperation,
   status: SyncOperation["status"],
   patch: Partial<SyncOperation> = {},
@@ -151,7 +152,7 @@ export type SyncWorkerOptions = {
  * Uploads local operations in creation order. HTTP 202 is only SERVER_PENDING;
  * the local operation is retained until the server status endpoint confirms SYNCED.
  */
-export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<void> {
+export async function runSyncWorker(options: SyncWorkerOptions): Promise<void> {
   if (typeof window === "undefined" || typeof navigator === "undefined") return;
   if (!options.userId) throw new Error("An authenticated user is required for sync.");
   if (!navigator.onLine) return;
