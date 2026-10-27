@@ -4,14 +4,14 @@ import { useEffect, useState } from "react";
 import { listAllOperations, SYNC_QUEUE_UPDATED_EVENT } from "./idb";
 import type { SyncOperation } from "./types";
 
-export function useSyncOperations(): SyncOperation[] {
+export function useSyncOperations(userId: string): SyncOperation[] {
   const [operations, setOperations] = useState<SyncOperation[]>([]);
 
   useEffect(() => {
     let mounted = true;
 
     const refresh = () => {
-      void listAllOperations()
+      void listAllOperations(userId)
         .then((rows) => {
           if (mounted) setOperations(rows);
         })
@@ -21,12 +21,17 @@ export function useSyncOperations(): SyncOperation[] {
     };
 
     refresh();
-    window.addEventListener(SYNC_QUEUE_UPDATED_EVENT, refresh);
+    const handleQueueUpdated = (event: Event) => {
+      const eventUserId = (event as CustomEvent<{ userId?: string }>).detail?.userId;
+      if (eventUserId === userId) refresh();
+    };
+
+    window.addEventListener(SYNC_QUEUE_UPDATED_EVENT, handleQueueUpdated);
     return () => {
       mounted = false;
-      window.removeEventListener(SYNC_QUEUE_UPDATED_EVENT, refresh);
+      window.removeEventListener(SYNC_QUEUE_UPDATED_EVENT, handleQueueUpdated);
     };
-  }, []);
+  }, [userId]);
 
   return operations;
 }

@@ -8,13 +8,13 @@ import {
 } from "./sync-manager";
 import type { SyncSnapshot } from "./types";
 
-export function useSyncStatus(): SyncSnapshot {
+export function useSyncStatus(userId: string): SyncSnapshot {
   const [state, setState] = useState<SyncSnapshot>(() => getSyncSnapshot());
 
   useEffect(() => {
-    initializeSyncManager();
+    initializeSyncManager(userId);
     return subscribeToSync(setState);
-  }, []);
+  }, [userId]);
 
   return state;
 }

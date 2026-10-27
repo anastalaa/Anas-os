@@ -17,8 +17,8 @@ function formatDate(value: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
-export default function ConflictCenter() {
-  const operations = useSyncOperations();
+export default function ConflictCenter({ userId }: { userId: string }) {
+  const operations = useSyncOperations(userId);
   const [actionError, setActionError] = useState<string | null>(null);
   const unresolved = operations.filter((operation) =>
     operation.status === "CONFLICT" ||
@@ -29,7 +29,7 @@ export default function ConflictCenter() {
   async function keepServer(operation: SyncOperation) {
     try {
       setActionError(null);
-      await updateOperation(buildKeepServerResolution(operation));
+      await updateOperation(userId, buildKeepServerResolution(operation));
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Could not resolve this conflict.");
     }
@@ -45,9 +45,9 @@ export default function ConflictCenter() {
 
       const result = buildKeepMineOperations(operation, serverVersion);
       // Persist the new intent first; keep the original operation as local resolution history.
-      await updateOperation(result.retry);
-      await updateOperation(result.resolved);
-      await triggerSync();
+      await updateOperation(userId, result.retry);
+      await updateOperation(userId, result.resolved);
+      await triggerSync(userId);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Could not reapply the local changes.");
     }
@@ -56,8 +56,8 @@ export default function ConflictCenter() {
   async function retryError(operation: SyncOperation) {
     try {
       setActionError(null);
-      await retrySyncOperation(operation);
-      await triggerSync();
+      await retrySyncOperation(userId, operation);
+      await triggerSync(userId);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Could not retry this operation.");
     }
