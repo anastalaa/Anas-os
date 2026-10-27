@@ -9,23 +9,24 @@ export const SYNC_STATES = [
 ] as const;
 
 export type SyncState = (typeof SYNC_STATES)[number];
-
 export type SyncOperationType = "CREATE" | "UPDATE" | "DELETE";
-
 export type SyncOperationStatus =
   | "PENDING"
   | "SYNCING"
   | "SERVER_PENDING"
   | "SYNCED"
   | "CONFLICT"
-  | "ERROR";
+  | "ERROR"
+  | "DISCARDED";
 
+export type ConflictResolution = "KEEP_SERVER" | "KEEP_MINE";
 export type OfflineEntity = "task" | "project" | "note" | "document" | "capture";
 
 export type SyncOperation = {
   id: string;
-  /** Stable UUID used for server-side idempotency across retries. */
   clientOperationId?: string;
+  parentOperationId?: string;
+  resolution?: ConflictResolution;
   workspaceId: string;
   entity: OfflineEntity;
   entityId: string;
@@ -36,7 +37,6 @@ export type SyncOperation = {
   status: SyncOperationStatus;
   createdAt: string;
   updatedAt: string;
-  /** Version returned only after the server confirms application. */
   serverVersion?: number;
   attemptCount?: number;
   nextRetryAt?: string | null;
@@ -47,7 +47,6 @@ export type SyncOperation = {
 
 export type SyncSnapshot = {
   state: SyncState;
-  /** Operations that have not yet reached a confirmed SYNCED state. */
   pendingCount: number;
   lastSyncedAt: string | null;
   lastError: string | null;

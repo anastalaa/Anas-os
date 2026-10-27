@@ -1,5 +1,6 @@
 import Link from "next/link";
 import SyncStatus from "./sync-status";
+import ConflictCenter from "./conflict-center";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { hasSupabaseConfig } from "@/lib/env";
 
@@ -31,6 +32,7 @@ export default async function DashboardPage() {
         </p>
 
         <SyncStatus />
+        <ConflictCenter />
 
         <div style={{ marginTop: 24 }}>
           <Link

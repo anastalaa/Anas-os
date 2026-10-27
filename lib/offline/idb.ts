@@ -12,7 +12,6 @@ function openDatabase(): Promise<IDBDatabase> {
 
   return new Promise((resolve, reject) => {
     const request = window.indexedDB.open(DB_NAME, DB_VERSION);
-
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
@@ -22,7 +21,6 @@ function openDatabase(): Promise<IDBDatabase> {
         store.createIndex("createdAt", "createdAt", { unique: false });
       }
     };
-
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("Unable to open offline database."));
   });
@@ -40,7 +38,6 @@ function getAllRows(db: IDBDatabase, workspaceId?: string): Promise<SyncOperatio
     const request = workspaceId
       ? tx.objectStore(STORE_NAME).index("workspaceId").getAll(IDBKeyRange.only(workspaceId))
       : tx.objectStore(STORE_NAME).getAll();
-
     request.onsuccess = () => resolve(request.result as SyncOperation[]);
     request.onerror = () => reject(request.error ?? new Error("Unable to read sync queue."));
   });
@@ -62,7 +59,6 @@ export async function enqueueOperation(operation: SyncOperation): Promise<void> 
   notifyQueueUpdated();
 }
 
-/** Returns operations ready to upload, including interrupted work from a prior session. */
 export async function listPendingOperations(workspaceId?: string): Promise<SyncOperation[]> {
   const db = await openDatabase();
   let rows: SyncOperation[];
@@ -84,7 +80,6 @@ export async function listPendingOperations(workspaceId?: string): Promise<SyncO
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
-/** Includes server-pending and conflicted records so the UI cannot report a false clean sync. */
 export async function listAllOperations(workspaceId?: string): Promise<SyncOperation[]> {
   const db = await openDatabase();
   try {
@@ -97,7 +92,9 @@ export async function listAllOperations(workspaceId?: string): Promise<SyncOpera
 
 export async function countPendingOperations(workspaceId?: string): Promise<number> {
   const operations = await listAllOperations(workspaceId);
-  return operations.filter((operation) => operation.status !== "SYNCED").length;
+  return operations.filter((operation) =>
+    operation.status !== "SYNCED" && operation.status !== "DISCARDED"
+  ).length;
 }
 
 export async function updateOperation(operation: SyncOperation): Promise<void> {
