@@ -7,6 +7,7 @@ import type { SyncOperation } from "./types";
 
 const DEVICE_STORAGE_KEY = "anas-os-device-id";
 const APP_VERSION = "0.1.0";
+const SERVER_STATUS_POLL_MS = 5_000;
 
 type ApiBody = {
   data?: { id?: string; status?: string; error_code?: string; [key: string]: unknown };
@@ -93,7 +94,9 @@ async function reconcileServerPending(fetcher: typeof fetch, workspaceId?: strin
         await updateStatus(operation, "PENDING", { error: undefined, retryable: true, nextRetryAt: null });
       } else if (!response.ok) {
         // Keep SERVER_PENDING: a temporary status-query failure does not prove the write failed.
-        continue;
+        await updateStatus(operation, "SERVER_PENDING", {
+          nextRetryAt: new Date(Date.now() + SERVER_STATUS_POLL_MS).toISOString(),
+        });
       } else if (body.data?.status === "SYNCED") {
         await updateStatus(operation, "SYNCED", {
           error: undefined,
@@ -116,10 +119,21 @@ async function reconcileServerPending(fetcher: typeof fetch, workspaceId?: strin
           retryable: false,
           nextRetryAt: null,
         });
+      } else {
+        // PENDING/SYNCING responses get a bounded poll interval, not an immediate loop.
+        await updateStatus(operation, "SERVER_PENDING", {
+          nextRetryAt: new Date(Date.now() + SERVER_STATUS_POLL_MS).toISOString(),
+        });
       }
     } catch {
-      // Network loss cannot establish whether the server accepted or processed the operation.
-      return;
+      // The server may still be processing; schedule a later status check rather than resubmitting.
+      try {
+        await updateStatus(operation, "SERVER_PENDING", {
+          nextRetryAt: new Date(Date.now() + SERVER_STATUS_POLL_MS).toISOString(),
+        });
+      } catch {
+        return;
+      }
     }
   }
 }
@@ -218,6 +232,19 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
         continue;
       }
 
+      if (
+        response.status === 403 &&
+        body.error?.message === "The device is not registered to this account."
+      ) {
+        window.localStorage.removeItem(DEVICE_STORAGE_KEY);
+        await updateStatus(operation, "PENDING", {
+          error: "This device will be re-registered for the current account.",
+          retryable: true,
+          nextRetryAt: null,
+        });
+        return;
+      }
+
       if (response.status === 401) {
         await updateStatus(operation, "ERROR", {
           error: body.error?.message ?? "Sign in to resume synchronization, then retry this operation.",
@@ -261,7 +288,7 @@ export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<vo
         await updateStatus(operation, "SERVER_PENDING", {
           error: undefined,
           retryable: false,
-          nextRetryAt: null,
+          nextRetryAt: new Date(Date.now() + SERVER_STATUS_POLL_MS).toISOString(),
         });
         blockedEntities.add(entityKey(operation));
       }

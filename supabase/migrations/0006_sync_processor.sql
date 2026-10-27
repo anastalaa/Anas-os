@@ -67,6 +67,16 @@ begin
     return jsonb_build_object('id', op.id, 'status', 'FAILED', 'error_code', 'FORBIDDEN');
   end if;
 
+  -- The current tables implement deletion as a soft-delete UPDATE under EDIT RLS.
+  if op.operation = 'DELETE' and not public.has_workspace_permission(
+    op.workspace_id, op.entity_type, 'EDIT'::public.permission_action, auth.uid()
+  ) then
+    update public.sync_operations
+       set status = 'FAILED', error_code = 'FORBIDDEN', server_timestamp = now()
+     where id = op.id;
+    return jsonb_build_object('id', op.id, 'status', 'FAILED', 'error_code', 'FORBIDDEN');
+  end if;
+
   update public.sync_operations set status = 'SYNCING', error_code = null where id = op.id;
 
   begin

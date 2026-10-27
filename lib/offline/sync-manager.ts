@@ -81,8 +81,16 @@ async function scheduleNextRetry() {
   try {
     const operations = await listAllOperations();
     const retryAt = operations
-      .filter((operation) => operation.status === "ERROR" && operation.retryable === true && operation.nextRetryAt)
-      .map((operation) => Date.parse(operation.nextRetryAt as string))
+      .filter((operation) =>
+        (operation.status === "ERROR" && operation.retryable === true) ||
+        operation.status === "SERVER_PENDING"
+      )
+      .map((operation) => {
+        if (!operation.nextRetryAt) {
+          return operation.status === "SERVER_PENDING" ? Date.now() + 1_000 : NaN;
+        }
+        return Date.parse(operation.nextRetryAt);
+      })
       .filter(Number.isFinite)
       .sort((a, b) => a - b)[0];
 
