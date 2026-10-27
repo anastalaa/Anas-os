@@ -4,6 +4,7 @@ export const syncEntitySchema = z.enum(["task", "project", "note", "document"]);
 export const syncOperationSchema = z.enum(["CREATE", "UPDATE", "DELETE"]);
 
 export const syncRequestSchema = z.object({
+  expected_user_id: z.string().uuid().optional(),
   device_id: z.string().uuid(),
   workspace_id: z.string().uuid(),
   entity_type: syncEntitySchema,
@@ -16,6 +17,7 @@ export const syncRequestSchema = z.object({
 });
 
 export const registerDeviceSchema = z.object({
+  expected_user_id: z.string().uuid().optional(),
   device_name: z.string().trim().min(1).max(120),
   device_type: z.string().trim().max(50).nullable().optional(),
   platform: z.string().trim().max(50).nullable().optional(),

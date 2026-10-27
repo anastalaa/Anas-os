@@ -31,8 +31,8 @@ export default async function DashboardPage() {
           Authenticated as {user.email ?? "your account"}. Core workspace modules are being built behind this boundary.
         </p>
 
-        <SyncStatus />
-        <ConflictCenter />
+        <SyncStatus userId={user.id} />
+        <ConflictCenter userId={user.id} />
 
         <div style={{ marginTop: 24 }}>
           <Link

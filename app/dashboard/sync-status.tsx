@@ -13,8 +13,8 @@ const labels = {
   ERROR: "Sync error",
 } as const;
 
-export default function SyncStatus() {
-  const sync = useSyncStatus();
+export default function SyncStatus({ userId }: { userId: string }) {
+  const sync = useSyncStatus(userId);
 
   return (
     <div
@@ -46,7 +46,7 @@ export default function SyncStatus() {
       </div>
       <button
         type="button"
-        onClick={() => void triggerSync()}
+        onClick={() => void triggerSync(userId)}
         disabled={sync.state === "OFFLINE" || sync.state === "SYNCING"}
         style={{
           border: "1px solid var(--border)",
