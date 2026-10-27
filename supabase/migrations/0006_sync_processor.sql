@@ -4,6 +4,9 @@
 alter table public.documents
   add column if not exists deleted_at timestamptz;
 
+alter table public.sync_operations
+  add column if not exists server_version bigint;
+
 create index if not exists sync_pending_queue_idx
   on public.sync_operations(status, created_at)
   where status in ('PENDING', 'SYNCING');
@@ -36,6 +39,7 @@ begin
       'id', op.id,
       'status', op.status,
       'error_code', op.error_code,
+      'server_version', op.server_version,
       'server_timestamp', op.server_timestamp
     );
   end if;
@@ -160,7 +164,7 @@ begin
            where id = op.entity_id and workspace_id = op.workspace_id and deleted_at is null
            for update;
           if not found or op.base_version is distinct from current_version then
-            update public.sync_operations set status = 'CONFLICT', error_code = 'VERSION_CONFLICT', server_timestamp = now() where id = op.id;
+            update public.sync_operations set status = 'CONFLICT', error_code = 'VERSION_CONFLICT', server_version = current_version, server_timestamp = now() where id = op.id;
             return jsonb_build_object('id', op.id, 'status', 'CONFLICT', 'error_code', 'VERSION_CONFLICT', 'server_version', current_version);
           end if;
           if op.operation = 'DELETE' then
@@ -186,7 +190,7 @@ begin
            where id = op.entity_id and workspace_id = op.workspace_id and deleted_at is null
            for update;
           if not found or op.base_version is distinct from current_version then
-            update public.sync_operations set status = 'CONFLICT', error_code = 'VERSION_CONFLICT', server_timestamp = now() where id = op.id;
+            update public.sync_operations set status = 'CONFLICT', error_code = 'VERSION_CONFLICT', server_version = current_version, server_timestamp = now() where id = op.id;
             return jsonb_build_object('id', op.id, 'status', 'CONFLICT', 'error_code', 'VERSION_CONFLICT', 'server_version', current_version);
           end if;
           if op.operation = 'DELETE' then
@@ -211,7 +215,7 @@ begin
            where id = op.entity_id and workspace_id = op.workspace_id and deleted_at is null
            for update;
           if not found or op.base_version is distinct from current_version then
-            update public.sync_operations set status = 'CONFLICT', error_code = 'VERSION_CONFLICT', server_timestamp = now() where id = op.id;
+            update public.sync_operations set status = 'CONFLICT', error_code = 'VERSION_CONFLICT', server_version = current_version, server_timestamp = now() where id = op.id;
             return jsonb_build_object('id', op.id, 'status', 'CONFLICT', 'error_code', 'VERSION_CONFLICT', 'server_version', current_version);
           end if;
           if op.operation = 'DELETE' then
@@ -233,7 +237,7 @@ begin
            where id = op.entity_id and workspace_id = op.workspace_id and deleted_at is null
            for update;
           if not found or op.base_version is distinct from current_version then
-            update public.sync_operations set status = 'CONFLICT', error_code = 'VERSION_CONFLICT', server_timestamp = now() where id = op.id;
+            update public.sync_operations set status = 'CONFLICT', error_code = 'VERSION_CONFLICT', server_version = current_version, server_timestamp = now() where id = op.id;
             return jsonb_build_object('id', op.id, 'status', 'CONFLICT', 'error_code', 'VERSION_CONFLICT', 'server_version', current_version);
           end if;
           if op.operation = 'DELETE' then
@@ -274,7 +278,7 @@ begin
   end;
 
   update public.sync_operations
-     set status = 'SYNCED', error_code = null, server_timestamp = now()
+     set status = 'SYNCED', error_code = null, server_version = target_version, server_timestamp = now()
    where id = op.id;
 
   return jsonb_build_object(

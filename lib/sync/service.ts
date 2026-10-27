@@ -17,6 +17,21 @@ const writePermissions = {
   DELETE: "DELETE",
 } as const;
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right));
+    return "{" + entries.map(([key, item]) => JSON.stringify(key) + ":" + canonicalJson(item)).join(",") + "}";
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function sameInstant(left: string, right: string): boolean {
+  const leftTime = Date.parse(left);
+  const rightTime = Date.parse(right);
+  return Number.isFinite(leftTime) && leftTime === rightTime;
+}
+
 function matchesIdempotentRequest(
   existing: {
     workspace_id: string | null;
@@ -35,8 +50,8 @@ function matchesIdempotentRequest(
     existing.entity_id === input.entity_id &&
     existing.operation === input.operation &&
     existing.base_version === (input.base_version ?? null) &&
-    existing.client_timestamp === input.client_timestamp &&
-    JSON.stringify(existing.payload ?? {}) === JSON.stringify(input.payload ?? {})
+    sameInstant(existing.client_timestamp, input.client_timestamp) &&
+    canonicalJson(existing.payload ?? {}) === canonicalJson(input.payload ?? {})
   );
 }
 
@@ -184,7 +199,7 @@ export async function getSyncOperationStatus(
 ) {
   const { data, error } = await supabase
     .from("sync_operations")
-    .select("client_operation_id,entity_type,entity_id,operation,base_version,status,error_code,created_at,server_timestamp")
+    .select("client_operation_id,entity_type,entity_id,operation,base_version,status,error_code,server_version,created_at,server_timestamp")
     .eq("user_id", user.id)
     .eq("client_operation_id", clientOperationId)
     .maybeSingle();

@@ -95,10 +95,18 @@ async function reconcileServerPending(fetcher: typeof fetch, workspaceId?: strin
         // Keep SERVER_PENDING: a temporary status-query failure does not prove the write failed.
         continue;
       } else if (body.data?.status === "SYNCED") {
-        await updateStatus(operation, "SYNCED", { error: undefined, retryable: false, nextRetryAt: null });
+        await updateStatus(operation, "SYNCED", {
+          error: undefined,
+          retryable: false,
+          nextRetryAt: null,
+          serverVersion: typeof body.data.server_version === "number" ? body.data.server_version : operation.serverVersion,
+        });
       } else if (body.data?.status === "CONFLICT") {
+        const serverVersion = typeof body.data.server_version === "number" ? body.data.server_version : undefined;
         await updateStatus(operation, "CONFLICT", {
           error: body.data?.error_code ? String(body.data.error_code) : "The server reported a synchronization conflict.",
+          conflictDetails: serverVersion === undefined ? operation.conflictDetails : { server_version: serverVersion },
+          serverVersion: serverVersion ?? operation.serverVersion,
           retryable: false,
           nextRetryAt: null,
         });
