@@ -155,6 +155,28 @@ export async function queueSyncOperation(
   return data;
 }
 
+type SyncProcessResult = {
+  id?: string;
+  status?: "PENDING" | "SYNCING" | "SYNCED" | "CONFLICT" | "FAILED";
+  server_version?: number | null;
+  error_code?: string | null;
+  server_timestamp?: string;
+};
+
+export async function processSyncOperation(supabase: SupabaseClient, operationId: string): Promise<SyncProcessResult> {
+  const { data, error } = await supabase.rpc("process_sync_operation", {
+    target_operation_id: operationId,
+  });
+
+  if (error) {
+    throw new ApiError(500, "INTERNAL_ERROR", "The sync processor could not apply the queued operation.");
+  }
+  if (!data || typeof data !== "object") {
+    throw new ApiError(500, "INTERNAL_ERROR", "The sync processor returned an invalid result.");
+  }
+  return data as SyncProcessResult;
+}
+
 export async function getSyncOperationStatus(
   supabase: SupabaseClient,
   user: User,
