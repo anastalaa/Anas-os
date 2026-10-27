@@ -7,6 +7,7 @@ describe("offline sync contracts", () => {
       "ONLINE",
       "OFFLINE",
       "SYNCING",
+      "SERVER_PENDING",
       "SYNCED",
       "CONFLICT",
       "ERROR",
@@ -16,6 +17,7 @@ describe("offline sync contracts", () => {
   it("supports version-aware queued operations", () => {
     const operation: SyncOperation = {
       id: "op-1",
+      clientOperationId: "00000000-0000-4000-8000-000000000004",
       workspaceId: "workspace-1",
       entity: "task",
       entityId: "task-1",
@@ -31,5 +33,6 @@ describe("offline sync contracts", () => {
     expect(operation.baseVersion).toBe(4);
     expect(operation.clientVersion).toBe(5);
     expect(operation.status).toBe("PENDING");
+    expect(operation.clientOperationId).toMatch(/^[0-9a-f-]{36}$/i);
   });
 });

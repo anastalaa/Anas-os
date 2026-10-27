@@ -52,6 +52,29 @@ export async function queueSyncOperation(
   if (deviceError) throw new ApiError(500, "INTERNAL_ERROR", "Device could not be verified.");
   if (!device) throw new ApiError(403, "FORBIDDEN", "The device is not registered to this account.");
 
+  // Retries must return the originally accepted operation rather than creating duplicates.
+  if (input.client_operation_id) {
+    const { data: existing, error: existingError } = await supabase
+      .from("sync_operations")
+      .select("id,client_operation_id,entity_type,entity_id,operation,base_version,client_timestamp,status,created_at")
+      .eq("user_id", user.id)
+      .eq("device_id", input.device_id)
+      .eq("client_operation_id", input.client_operation_id)
+      .maybeSingle();
+
+    if (existingError) throw new ApiError(500, "INTERNAL_ERROR", "Idempotency state could not be read.");
+    if (existing) {
+      const matches =
+        existing.entity_type === input.entity_type &&
+        existing.entity_id === input.entity_id &&
+        existing.operation === input.operation;
+      if (!matches) {
+        throw new ApiError(409, "CONFLICT", "This client operation ID was already used for a different operation.");
+      }
+      return existing;
+    }
+  }
+
   let currentVersion: number | null = null;
   if (input.operation !== "CREATE") {
     const { data: current, error: currentError } = await supabase
@@ -76,23 +99,62 @@ export async function queueSyncOperation(
     }
   }
 
+  const insertPayload = {
+    device_id: input.device_id,
+    user_id: user.id,
+    workspace_id: input.workspace_id,
+    entity_type: input.entity_type,
+    entity_id: input.entity_id,
+    operation: input.operation,
+    payload: input.payload,
+    base_version: input.base_version ?? currentVersion,
+    client_timestamp: input.client_timestamp,
+    status: "PENDING",
+    ...(input.client_operation_id ? { client_operation_id: input.client_operation_id } : {}),
+  };
+
   const { data, error } = await supabase
     .from("sync_operations")
-    .insert({
-      device_id: input.device_id,
-      user_id: user.id,
-      workspace_id: input.workspace_id,
-      entity_type: input.entity_type,
-      entity_id: input.entity_id,
-      operation: input.operation,
-      payload: input.payload,
-      base_version: input.base_version ?? currentVersion,
-      client_timestamp: input.client_timestamp,
-      status: "PENDING",
-    })
-    .select("id,entity_type,entity_id,operation,base_version,client_timestamp,status,created_at")
+    .insert(insertPayload)
+    .select("id,client_operation_id,entity_type,entity_id,operation,base_version,client_timestamp,status,created_at")
     .single();
 
+  // A concurrent retry can hit the unique index. Re-read by the same idempotency key.
+  if (error && input.client_operation_id) {
+    const { data: existing } = await supabase
+      .from("sync_operations")
+      .select("id,client_operation_id,entity_type,entity_id,operation,base_version,client_timestamp,status,created_at")
+      .eq("user_id", user.id)
+      .eq("device_id", input.device_id)
+      .eq("client_operation_id", input.client_operation_id)
+      .maybeSingle();
+    if (
+      existing &&
+      existing.entity_type === input.entity_type &&
+      existing.entity_id === input.entity_id &&
+      existing.operation === input.operation
+    ) {
+      return existing;
+    }
+  }
+
   if (error) throw new ApiError(500, "INTERNAL_ERROR", "Sync operation could not be queued.");
+  return data;
+}
+
+export async function getSyncOperationStatus(
+  supabase: SupabaseClient,
+  user: User,
+  clientOperationId: string,
+) {
+  const { data, error } = await supabase
+    .from("sync_operations")
+    .select("client_operation_id,entity_type,entity_id,operation,base_version,status,error_code,created_at,server_timestamp")
+    .eq("user_id", user.id)
+    .eq("client_operation_id", clientOperationId)
+    .maybeSingle();
+
+  if (error) throw new ApiError(500, "INTERNAL_ERROR", "Sync status could not be read.");
+  if (!data) throw new ApiError(404, "NOT_FOUND", "Sync operation was not found.");
   return data;
 }

@@ -11,6 +11,7 @@ export const syncRequestSchema = z.object({
   operation: syncOperationSchema,
   payload: z.record(z.string(), z.unknown()).default({}),
   base_version: z.number().int().nonnegative().nullable().optional(),
+  client_operation_id: z.string().uuid().optional(),
   client_timestamp: z.string().datetime({ offset: true }),
 });
 

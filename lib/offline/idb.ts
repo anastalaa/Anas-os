@@ -27,37 +27,67 @@ function openDatabase(): Promise<IDBDatabase> {
   });
 }
 
-export async function enqueueOperation(operation: SyncOperation): Promise<void> {
-  const db = await openDatabase();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    tx.objectStore(STORE_NAME).put(operation);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error("Unable to queue sync operation."));
-  });
-  db.close();
-}
-
-export async function listPendingOperations(workspaceId?: string): Promise<SyncOperation[]> {
-  const db = await openDatabase();
-  const operations = await new Promise<SyncOperation[]>((resolve, reject) => {
+function getAllRows(db: IDBDatabase, workspaceId?: string): Promise<SyncOperation[]> {
+  return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readonly");
     const request = workspaceId
       ? tx.objectStore(STORE_NAME).index("workspaceId").getAll(IDBKeyRange.only(workspaceId))
       : tx.objectStore(STORE_NAME).getAll();
 
-    request.onsuccess = () => {
-      const rows = request.result as SyncOperation[];
-      resolve(rows.filter((operation) => operation.status === "PENDING" || operation.status === "ERROR"));
-    };
+    request.onsuccess = () => resolve(request.result as SyncOperation[]);
     request.onerror = () => reject(request.error ?? new Error("Unable to read sync queue."));
   });
-  db.close();
-  return operations.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+export async function enqueueOperation(operation: SyncOperation): Promise<void> {
+  const db = await openDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).put(operation);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("Unable to queue sync operation."));
+      tx.onabort = () => reject(tx.error ?? new Error("Sync queue update was aborted."));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/** Returns operations ready to upload, including interrupted work from a prior session. */
+export async function listPendingOperations(workspaceId?: string): Promise<SyncOperation[]> {
+  const db = await openDatabase();
+  let rows: SyncOperation[];
+  try {
+    rows = await getAllRows(db, workspaceId);
+  } finally {
+    db.close();
+  }
+
+  const now = Date.now();
+  return rows
+    .filter((operation) => {
+      if (operation.status === "PENDING" || operation.status === "SYNCING") return true;
+      if (operation.status !== "ERROR" || operation.retryable === false) return false;
+      return !operation.nextRetryAt || Date.parse(operation.nextRetryAt) <= now;
+    })
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+/** Includes server-pending and conflicted records so the UI cannot report a false clean sync. */
+export async function listAllOperations(workspaceId?: string): Promise<SyncOperation[]> {
+  const db = await openDatabase();
+  try {
+    const rows = await getAllRows(db, workspaceId);
+    return rows.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  } finally {
+    db.close();
+  }
 }
 
 export async function countPendingOperations(workspaceId?: string): Promise<number> {
-  return (await listPendingOperations(workspaceId)).length;
+  const operations = await listAllOperations(workspaceId);
+  return operations.filter((operation) => operation.status !== "SYNCED").length;
 }
 
 export async function updateOperation(operation: SyncOperation): Promise<void> {
@@ -66,11 +96,15 @@ export async function updateOperation(operation: SyncOperation): Promise<void> {
 
 export async function clearOperation(id: string): Promise<void> {
   const db = await openDatabase();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    tx.objectStore(STORE_NAME).delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error("Unable to remove sync operation."));
-  });
-  db.close();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).delete(id);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("Unable to remove sync operation."));
+      tx.onabort = () => reject(tx.error ?? new Error("Removing a sync operation was aborted."));
+    });
+  } finally {
+    db.close();
+  }
 }

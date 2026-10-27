@@ -1,0 +1,243 @@
+import {
+  listAllOperations,
+  listPendingOperations,
+  updateOperation,
+} from "./idb";
+import type { SyncOperation } from "./types";
+
+const DEVICE_STORAGE_KEY = "anas-os-device-id";
+const APP_VERSION = "0.1.0";
+
+type ApiBody = {
+  data?: { status?: string; [key: string]: unknown };
+  error?: { code?: string; message?: string };
+};
+
+export function calculateRetryDelayMs(attemptCount: number): number {
+  const attempt = Math.max(1, Math.trunc(attemptCount));
+  return Math.min(300_000, 1_000 * 2 ** Math.min(attempt - 1, 8));
+}
+
+function createClientOperationId(): string {
+  if (!globalThis.crypto?.randomUUID) {
+    throw new Error("Secure UUID generation is unavailable; sync was not started.");
+  }
+  return globalThis.crypto.randomUUID();
+}
+
+async function parseBody(response: Response): Promise<ApiBody> {
+  try {
+    return (await response.json()) as ApiBody;
+  } catch {
+    return {};
+  }
+}
+
+async function getOrRegisterDevice(fetcher: typeof fetch): Promise<string> {
+  if (typeof window === "undefined") throw new Error("Sync requires a browser session.");
+  const storedId = window.localStorage.getItem(DEVICE_STORAGE_KEY);
+  if (storedId) return storedId;
+
+  const response = await fetcher("/api/devices", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      device_name: "ANAS OS Web",
+      device_type: "browser",
+      platform: window.navigator.userAgent.slice(0, 50),
+      app_version: APP_VERSION,
+    }),
+  });
+  const body = await parseBody(response);
+  const deviceId = body.data?.id;
+  if (!response.ok || typeof deviceId !== "string") {
+    throw new Error(body.error?.message ?? "This device could not be registered for sync.");
+  }
+
+  window.localStorage.setItem(DEVICE_STORAGE_KEY, deviceId);
+  return deviceId;
+}
+
+async function updateStatus(operation: SyncOperation, status: SyncOperation["status"], patch: Partial<SyncOperation> = {}) {
+  await updateOperation({
+    ...operation,
+    ...patch,
+    status,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function reconcileServerPending(fetcher: typeof fetch, workspaceId?: string): Promise<void> {
+  const operations = await listAllOperations(workspaceId);
+  for (const operation of operations) {
+    if (operation.status !== "SERVER_PENDING" || !operation.clientOperationId) continue;
+    if (typeof navigator !== "undefined" && !navigator.onLine) return;
+
+    try {
+      const response = await fetcher(
+        `/api/sync/status?client_operation_id=${encodeURIComponent(operation.clientOperationId)}`,
+        { method: "GET", cache: "no-store" },
+      );
+      const body = await parseBody(response);
+
+      if (response.status === 404) {
+        // The server has no record for this idempotency key; retry the same operation ID.
+        await updateStatus(operation, "PENDING", { error: undefined, retryable: true, nextRetryAt: null });
+      } else if (!response.ok) {
+        // Keep SERVER_PENDING: a temporary status-query failure does not prove the write failed.
+        continue;
+      } else if (body.data?.status === "SYNCED") {
+        await updateStatus(operation, "SYNCED", { error: undefined, retryable: false, nextRetryAt: null });
+      } else if (body.data?.status === "CONFLICT") {
+        await updateStatus(operation, "CONFLICT", {
+          error: body.data?.error_code ? String(body.data.error_code) : "The server reported a synchronization conflict.",
+          retryable: false,
+          nextRetryAt: null,
+        });
+      } else if (body.data?.status === "FAILED") {
+        await updateStatus(operation, "ERROR", {
+          error: body.data?.error_code ? String(body.data.error_code) : "The server failed to process this operation.",
+          retryable: false,
+          nextRetryAt: null,
+        });
+      }
+    } catch {
+      // Network loss cannot establish whether the server accepted or processed the operation.
+      return;
+    }
+  }
+}
+
+export type SyncWorkerOptions = {
+  workspaceId?: string;
+  fetcher?: typeof fetch;
+  maxOperations?: number;
+};
+
+/**
+ * Uploads local operations in creation order. HTTP 202 is only SERVER_PENDING;
+ * the local operation is retained until the server status endpoint confirms SYNCED.
+ */
+export async function runSyncWorker(options: SyncWorkerOptions = {}): Promise<void> {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return;
+  if (!navigator.onLine) return;
+
+  const fetcher = options.fetcher ?? fetch;
+  await reconcileServerPending(fetcher, options.workspaceId);
+  const deviceId = await getOrRegisterDevice(fetcher);
+  const pending = await listPendingOperations(options.workspaceId);
+  const queue = pending.slice(0, Math.max(1, options.maxOperations ?? 50));
+
+  for (const queued of queue) {
+    if (!navigator.onLine) return;
+
+    if (queued.entity === "capture") {
+      await updateStatus(queued, "ERROR", {
+        error: "Capture sync is not supported by the server yet.",
+        retryable: false,
+        nextRetryAt: null,
+      });
+      continue;
+    }
+
+    const operation: SyncOperation = {
+      ...queued,
+      clientOperationId: queued.clientOperationId ?? createClientOperationId(),
+      attemptCount: queued.attemptCount ?? 0,
+      retryable: true,
+    };
+
+    // Persist the idempotency key before network I/O, so interrupted uploads can be retried safely.
+    await updateStatus(operation, "SYNCING", { clientOperationId: operation.clientOperationId });
+
+    try {
+      const response = await fetcher("/api/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device_id: deviceId,
+          workspace_id: operation.workspaceId,
+          entity_type: operation.entity,
+          entity_id: operation.entityId,
+          operation: operation.operation,
+          payload: operation.payload,
+          base_version: operation.baseVersion,
+          client_operation_id: operation.clientOperationId,
+          client_timestamp: operation.createdAt,
+        }),
+      });
+      const body = await parseBody(response);
+
+      if (response.status === 409) {
+        await updateStatus(operation, "CONFLICT", {
+          error: body.error?.message ?? "The server detected a version conflict.",
+          retryable: false,
+          nextRetryAt: null,
+        });
+        continue;
+      }
+
+      if (response.status === 401) {
+        await updateStatus(operation, "PENDING", {
+          error: body.error?.message ?? "Sign in to resume synchronization.",
+          retryable: true,
+          nextRetryAt: null,
+        });
+        return;
+      }
+
+      if (response.status === 429 || response.status >= 500) {
+        const attempts = (operation.attemptCount ?? 0) + 1;
+        await updateStatus(operation, "ERROR", {
+          attemptCount: attempts,
+          error: body.error?.message ?? `Temporary sync failure (HTTP ${response.status}).`,
+          retryable: true,
+          nextRetryAt: new Date(Date.now() + calculateRetryDelayMs(attempts)).toISOString(),
+        });
+        return; // Preserve queue ordering after a transient failure.
+      }
+
+      if (!response.ok) {
+        await updateStatus(operation, "ERROR", {
+          error: body.error?.message ?? `Sync request failed (HTTP ${response.status}).`,
+          retryable: false,
+          nextRetryAt: null,
+        });
+        return; // Do not upload later operations around an unresolved earlier write.
+      }
+
+      if (body.data?.status === "SYNCED") {
+        await updateStatus(operation, "SYNCED", { error: undefined, retryable: false, nextRetryAt: null });
+      } else {
+        // 202 currently means accepted into the server queue, not applied to the entity.
+        await updateStatus(operation, "SERVER_PENDING", {
+          error: undefined,
+          retryable: false,
+          nextRetryAt: null,
+        });
+      }
+    } catch (error) {
+      const attempts = (operation.attemptCount ?? 0) + 1;
+      await updateStatus(operation, "ERROR", {
+        attemptCount: attempts,
+        error: error instanceof Error ? error.message : "Network error while synchronizing.",
+        retryable: true,
+        nextRetryAt: new Date(Date.now() + calculateRetryDelayMs(attempts)).toISOString(),
+      });
+      return;
+    }
+  }
+}
+
+/** Allows a user-facing Conflict Center or retry action to deliberately requeue an operation. */
+export async function retrySyncOperation(operation: SyncOperation): Promise<void> {
+  await updateOperation({
+    ...operation,
+    status: "PENDING",
+    error: undefined,
+    retryable: true,
+    attemptCount: 0,
+    nextRetryAt: null,
+    updatedAt: new Date().toISOString(),
+  });
+}
